@@ -1,86 +1,118 @@
-# main.py
+# main.py (升级版 - v2)
 import os
 import requests
 import json
+import time
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- 配置将从 Vercel 的环境变量中读取 ---
+# --- 从环境变量读取所有配置 ---
 WECOM_BOT_WEBHOOK_URL = os.environ.get("WECOM_BOT_WEBHOOK_URL")
+FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID")
+FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
 
-# 这是飞书事件订阅里一个可选的加密密钥，可以增强安全性
-# 我们暂时不设置，但代码里保留这个逻辑
-FEISHU_ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY")
+# --- 用于缓存飞书 tenant_access_token 的全局变量 ---
+feishu_token_cache = {
+    "token": "",
+    "expire_at": 0
+}
 
-# 这是飞书事件订阅里的 Verification Token，用于验证请求来源
-FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN")
+# --- 新增功能：获取飞书 tenant_access_token ---
+def get_feishu_token():
+    # 如果缓存中的 token 有效，则直接返回
+    if feishu_token_cache["token"] and feishu_token_cache["expire_at"] > time.time():
+        return feishu_token_cache["token"]
 
-# 飞书事件的主处理函数
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        # 缓存新的 token 和过期时间 (提前5分钟失效以防万一)
+        feishu_token_cache["token"] = data["tenant_access_token"]
+        feishu_token_cache["expire_at"] = time.time() + data["expire"] - 300
+        print("成功获取并缓存了新的飞书 token")
+        return feishu_token_cache["token"]
+    except requests.exceptions.RequestException as e:
+        print(f"获取飞书 token 失败: {e}")
+        return None
+
+# --- 新增功能：根据 user_id 获取用户名 ---
+def get_user_name(user_id):
+    token = get_feishu_token()
+    if not token:
+        return user_id # 如果获取 token 失败，则返回原始 ID
+
+    url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        # 返回用户的名字，如果获取失败则返回原始 ID
+        return data.get("data", {}).get("user", {}).get("name", user_id)
+    except requests.exceptions.RequestException as e:
+        print(f"获取用户名失败: {e}")
+        return user_id
+
+# --- 飞书事件的主处理函数 (已修改) ---
 @app.route('/feishu-event', methods=['POST'])
 def handle_feishu_event():
-    if not WECOM_BOT_WEBHOOK_URL:
-        print("错误：环境变量 WECOM_BOT_WEBHOOK_URL 未设置！")
-        return jsonify({"error": "服务器配置缺失"}), 500
-
     data = request.json
     
-    # 1. 处理飞书首次配置的 URL 验证
+    # URL 验证
     if data.get('type') == 'url_verification':
-        print("收到 URL 验证请求")
         return jsonify({'challenge': data.get('challenge')})
 
-    # 2. 安全性校验：检查 Token 是否匹配
-    header = data.get('header', {})
-    if FEISHU_VERIFICATION_TOKEN and header.get('token') != FEISHU_VERIFICATION_TOKEN:
-        print("错误：Verification Token 不匹配！")
-        return jsonify({"error": "无效的 token"}), 403
-
-    # 3. 处理真实的消息事件
-    if header.get('event_type') == 'im.message.receive_v1':
+    # 处理消息事件
+    if data.get('header', {}).get('event_type') == 'im.message.receive_v1':
         print("收到一条新消息事件")
-        try:
-            event = data.get('event', {})
-            message = event.get('message', {})
-            
-            # 我们只转发文本消息，忽略图片、文件等
-            if message.get('message_type') != 'text':
-                return jsonify({'status': '忽略非文本消息'})
+        event = data.get('event', {})
+        message = event.get('message', {})
+        
+        if message.get('message_type') != 'text':
+            return jsonify({'status': '忽略非文本消息'})
 
-            content_data = json.loads(message.get('content', '{}'))
-            text_content = content_data.get('text', '').strip()
-            
-            if not text_content:
-                return jsonify({'status': '忽略空消息'})
+        content_data = json.loads(message.get('content', '{}'))
+        text_content = content_data.get('text', '').strip()
+        
+        if not text_content:
+            return jsonify({'status': '忽略空消息'})
 
-            # 获取发送者信息 (为简化，我们暂时只用ID，后续可扩展为查询真实姓名)
-            sender_info = event.get('sender', {})
-            user_id = sender_info.get('sender_id', {}).get('user_id', '未知用户')
-            
-            # 格式化消息内容
-            formatted_message = f"【飞书消息】\n发送人: {user_id}\n内容: {text_content}"
-            
-            # 将格式化后的消息发送到企业微信
-            send_to_wecom(formatted_message)
-            return jsonify({'status': '转发成功'})
-        except Exception as e:
-            print(f"处理消息时发生错误: {e}")
-            return jsonify({'status': '处理事件时出错'}), 500
+        sender_info = event.get('sender', {})
+        user_id = sender_info.get('sender_id', {}).get('user_id')
+        
+        # *** 核心修改点：调用新函数获取用户名 ***
+        if user_id:
+            sender_name = get_user_name(user_id)
+        else:
+            sender_name = "未知用户"
+
+        formatted_message = f"【飞书消息】\n发送人: {sender_name}\n内容: {text_content}"
+        
+        send_to_wecom(formatted_message)
+        return jsonify({'status': '转发成功'})
 
     return jsonify({'status': '未处理的事件类型'})
 
-# 发送消息到企业微信的函数
+# 发送消息到企业微信的函数 (保持不变)
 def send_to_wecom(text_content):
     headers = {'Content-Type': 'application/json'}
     payload = { "msgtype": "text", "text": { "content": text_content } }
     try:
         response = requests.post(WECOM_BOT_WEBHOOK_URL, headers=headers, data=json.dumps(payload), timeout=5)
-        response.raise_for_status() # 如果请求失败则抛出异常
+        response.raise_for_status()
         print("成功发送消息到企业微信")
     except requests.exceptions.RequestException as e:
         print(f"发送到企业微信失败: {e}")
 
-# Vercel 会自动处理应用的启动，所以下面的 main 函数部分不是必需的，但保留也无妨
-if __name__ == '__main__':
-    app.run(debug=True, port=8000)
-  
+# 默认路由，用于 UptimeRobot 唤醒服务
+@app.route('/', methods=['GET'])
+def keep_alive():
+    return "Service is alive.", 200
