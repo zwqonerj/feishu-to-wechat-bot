@@ -1,4 +1,4 @@
-# main.py (最终优雅降级版 - v6)
+# main.py (最终本地解析版 - v7)
 import os
 import requests
 import json
@@ -9,8 +9,11 @@ app = Flask(__name__)
 
 # --- 从环境变量读取所有配置 ---
 WECOM_BOT_WEBHOOK_URL = os.environ.get("WECOM_BOT_WEBHOOK_URL")
+# (查询相关的环境变量依然保留，以备将来或处理其他用户时使用)
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
+
+# --- (以下所有查询相关的函数都保留，但主逻辑将不再优先使用它们) ---
 
 # --- 用于缓存飞书 tenant_access_token 的全局变量 ---
 feishu_token_cache = {
@@ -18,20 +21,16 @@ feishu_token_cache = {
     "expire_at": 0
 }
 
-# --- 获取飞书 tenant_access_token ---
 def get_feishu_token():
     if feishu_token_cache["token"] and feishu_token_cache["expire_at"] > time.time():
         return feishu_token_cache["token"]
-
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json; charset=utf-8"}
     payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
-    
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
-        
         if data.get("code") == 0:
             feishu_token_cache["token"] = data["tenant_access_token"]
             feishu_token_cache["expire_at"] = time.time() + data.get("expire", 7200) - 300
@@ -44,35 +43,26 @@ def get_feishu_token():
         print(f"请求飞书 token 接口时网络失败: {e}")
         return None
 
-# --- 最终版功能：智能判断 ID 类型并获取用户名 (带优雅降级) ---
-def get_user_name(user_id_str):
+def get_user_name_from_api(user_id_str):
     token = get_feishu_token()
     if not token or not user_id_str:
-        return user_id_str 
-
+        return None
     user_id_type = "user_id" if user_id_str.startswith("ou_") else "open_id"
     url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id_str}?user_id_type={user_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
-    
     try:
         response = requests.get(url, headers=headers)
-        data = response.json() # 无论成功失败都先解析返回的json
-        
-        # 只有当请求成功(HTTP 200)且飞书业务码为0时，才算成功
+        data = response.json()
         if response.status_code == 200 and data.get("code") == 0:
-            return data.get("data", {}).get("user", {}).get("name", user_id_str)
+            return data.get("data", {}).get("user", {}).get("name")
         else:
-            # 任何其他情况（包括400错误），都打印日志并返回原始ID
-            print(f"查询用户名失败, HTTP状态码: {response.status_code}, 飞书返回: {data}")
-            # 您也可以在这里返回一个更友好的名字，比如 "外部用户"
-            # return "外部用户" 
-            return user_id_str
-            
+            print(f"API查询用户名失败, HTTP状态码: {response.status_code}, 飞书返回: {data}")
+            return None
     except requests.exceptions.RequestException as e:
         print(f"请求获取用户名接口时网络失败: {e}")
-        return user_id_str
+        return None
 
-# --- 飞书事件的主处理函数 (保持不变) ---
+# --- 飞书事件的主处理函数 (核心逻辑变更) ---
 @app.route('/feishu-event', methods=['POST'])
 def handle_feishu_event():
     data = request.json
@@ -83,8 +73,29 @@ def handle_feishu_event():
     if data.get('header', {}).get('event_type') == 'im.message.receive_v1':
         print("收到一条新消息事件")
         event = data.get('event', {})
-        message = event.get('message', {})
         
+        # *** 核心修改点：直接从 sender 结构中提取信息 ***
+        sender_info = event.get('sender', {})
+        sender_id_map = sender_info.get('sender_id', {})
+        
+        # 策略 1: 尝试从 sender 里的 user_name 字段直接获取名字 (这是新版事件结构可能包含的)
+        sender_name = sender_info.get('sender_name')
+        
+        # 策略 2: 如果没有 sender_name，则退回到使用ID
+        if not sender_name:
+            user_id = sender_id_map.get('user_id') or sender_id_map.get('open_id')
+            # 策略 3: 如果有ID，我们仍然可以尝试API查询（作为最后的备用手段）
+            if user_id:
+                # 注释掉API查询，因为我们知道它对当前用户无效。
+                # sender_name = get_user_name_from_api(user_id)
+                
+                # 如果API查询失败或被注释，我们就直接使用ID作为名字
+                if not sender_name:
+                    sender_name = user_id
+            else:
+                sender_name = "未知用户"
+
+        message = event.get('message', {})
         if message.get('message_type') != 'text':
             return jsonify({'status': '忽略非文本消息'})
 
@@ -93,15 +104,6 @@ def handle_feishu_event():
         
         if not text_content:
             return jsonify({'status': '忽略空消息'})
-
-        sender_info = event.get('sender', {})
-        sender_id_map = sender_info.get('sender_id', {})
-        user_id = sender_id_map.get('user_id') or sender_id_map.get('open_id')
-        
-        if user_id:
-            sender_name = get_user_name(user_id)
-        else:
-            sender_name = "未知用户"
 
         formatted_message = f"【飞书消息】\n发送人: {sender_name}\n内容: {text_content}"
         send_to_wecom(formatted_message)
