@@ -1,4 +1,4 @@
-# main.py (最终完美版 - v4)
+# main.py (最终智能版 - v5)
 import os
 import requests
 import json
@@ -45,24 +45,34 @@ def get_feishu_token():
         print(f"请求飞书 token 接口时网络失败: {e}")
         return None
 
-# --- 升级版功能：根据 open_id 获取用户名 ---
-def get_user_name(user_id):
+# --- 最终版功能：智能判断 ID 类型并获取用户名 ---
+def get_user_name(user_id_str):
     token = get_feishu_token()
-    if not token:
-        return user_id 
+    if not token or not user_id_str:
+        return user_id_str 
 
-    # *** 核心修改点 1: 在URL中明确指定我们提供的ID类型是 open_id ***
-    url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id}?user_id_type=open_id"
+    # *** 核心修改点：智能判断 ID 类型 ***
+    # 如果 ID 是以 "ou_" 开头，我们就告诉飞书这是 user_id
+    # 否则，我们就认为它是 open_id
+    user_id_type = "user_id" if user_id_str.startswith("ou_") else "open_id"
+    
+    url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id_str}?user_id_type={user_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
-        return data.get("data", {}).get("user", {}).get("name", user_id)
+        # 如果查询成功，就返回真实姓名
+        if data.get("code") == 0:
+            return data.get("data", {}).get("user", {}).get("name", user_id_str)
+        # 如果查询失败，打印错误信息，并返回原始ID
+        else:
+            print(f"查询用户名失败, 飞书返回: {data}")
+            return user_id_str
     except requests.exceptions.RequestException as e:
-        print(f"获取用户名失败: {e}")
-        return user_id
+        print(f"请求获取用户名接口时网络失败: {e}")
+        return user_id_str
 
 # --- 飞书事件的主处理函数 ---
 @app.route('/feishu-event', methods=['POST'])
@@ -87,9 +97,10 @@ def handle_feishu_event():
             return jsonify({'status': '忽略空消息'})
 
         sender_info = event.get('sender', {})
+        sender_id_map = sender_info.get('sender_id', {})
         
-        # *** 核心修改点 2: 明确从 sender_id 中获取 open_id ***
-        user_id = sender_info.get('sender_id', {}).get('open_id')
+        # *** 核心修改点：优先获取 user_id，如果不存在再获取 open_id ***
+        user_id = sender_id_map.get('user_id') or sender_id_map.get('open_id')
         
         if user_id:
             sender_name = get_user_name(user_id)
