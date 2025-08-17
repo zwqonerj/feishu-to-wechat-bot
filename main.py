@@ -1,4 +1,4 @@
-# main.py (最终智能版 - v5)
+# main.py (最终优雅降级版 - v6)
 import os
 import requests
 import json
@@ -18,7 +18,7 @@ feishu_token_cache = {
     "expire_at": 0
 }
 
-# --- 升级版功能：获取飞书 tenant_access_token (带错误处理) ---
+# --- 获取飞书 tenant_access_token ---
 def get_feishu_token():
     if feishu_token_cache["token"] and feishu_token_cache["expire_at"] > time.time():
         return feishu_token_cache["token"]
@@ -40,41 +40,39 @@ def get_feishu_token():
         else:
             print(f"获取飞书 token 失败，飞书返回: {data}")
             return None
-
     except requests.exceptions.RequestException as e:
         print(f"请求飞书 token 接口时网络失败: {e}")
         return None
 
-# --- 最终版功能：智能判断 ID 类型并获取用户名 ---
+# --- 最终版功能：智能判断 ID 类型并获取用户名 (带优雅降级) ---
 def get_user_name(user_id_str):
     token = get_feishu_token()
     if not token or not user_id_str:
         return user_id_str 
 
-    # *** 核心修改点：智能判断 ID 类型 ***
-    # 如果 ID 是以 "ou_" 开头，我们就告诉飞书这是 user_id
-    # 否则，我们就认为它是 open_id
     user_id_type = "user_id" if user_id_str.startswith("ou_") else "open_id"
-    
     url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id_str}?user_id_type={user_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        # 如果查询成功，就返回真实姓名
-        if data.get("code") == 0:
+        data = response.json() # 无论成功失败都先解析返回的json
+        
+        # 只有当请求成功(HTTP 200)且飞书业务码为0时，才算成功
+        if response.status_code == 200 and data.get("code") == 0:
             return data.get("data", {}).get("user", {}).get("name", user_id_str)
-        # 如果查询失败，打印错误信息，并返回原始ID
         else:
-            print(f"查询用户名失败, 飞书返回: {data}")
+            # 任何其他情况（包括400错误），都打印日志并返回原始ID
+            print(f"查询用户名失败, HTTP状态码: {response.status_code}, 飞书返回: {data}")
+            # 您也可以在这里返回一个更友好的名字，比如 "外部用户"
+            # return "外部用户" 
             return user_id_str
+            
     except requests.exceptions.RequestException as e:
         print(f"请求获取用户名接口时网络失败: {e}")
         return user_id_str
 
-# --- 飞书事件的主处理函数 ---
+# --- 飞书事件的主处理函数 (保持不变) ---
 @app.route('/feishu-event', methods=['POST'])
 def handle_feishu_event():
     data = request.json
@@ -98,8 +96,6 @@ def handle_feishu_event():
 
         sender_info = event.get('sender', {})
         sender_id_map = sender_info.get('sender_id', {})
-        
-        # *** 核心修改点：优先获取 user_id，如果不存在再获取 open_id ***
         user_id = sender_id_map.get('user_id') or sender_id_map.get('open_id')
         
         if user_id:
@@ -108,7 +104,6 @@ def handle_feishu_event():
             sender_name = "未知用户"
 
         formatted_message = f"【飞书消息】\n发送人: {sender_name}\n内容: {text_content}"
-        
         send_to_wecom(formatted_message)
         return jsonify({'status': '转发成功'})
 
@@ -125,7 +120,7 @@ def send_to_wecom(text_content):
     except requests.exceptions.RequestException as e:
         print(f"发送到企业微信失败: {e}")
 
-# 默认路由，用于 UptimeRobot 唤醒服务 (保持不变)
+# 默认路由 (保持不变)
 @app.route('/', methods=['GET'])
 def keep_alive():
     return "Service is alive.", 200
