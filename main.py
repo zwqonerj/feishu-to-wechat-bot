@@ -1,4 +1,4 @@
-# main.py (最终健壮版 - v3)
+# main.py (最终完美版 - v4)
 import os
 import requests
 import json
@@ -32,14 +32,12 @@ def get_feishu_token():
         response.raise_for_status()
         data = response.json()
         
-        # *** 核心修改点：先检查返回码是否为0 (0代表成功) ***
         if data.get("code") == 0:
             feishu_token_cache["token"] = data["tenant_access_token"]
             feishu_token_cache["expire_at"] = time.time() + data.get("expire", 7200) - 300
             print("成功获取并缓存了新的飞书 token")
             return feishu_token_cache["token"]
         else:
-            # 如果不成功，打印出飞书返回的详细错误信息
             print(f"获取飞书 token 失败，飞书返回: {data}")
             return None
 
@@ -47,13 +45,14 @@ def get_feishu_token():
         print(f"请求飞书 token 接口时网络失败: {e}")
         return None
 
-# --- 新增功能：根据 user_id 获取用户名 (保持不变) ---
+# --- 升级版功能：根据 open_id 获取用户名 ---
 def get_user_name(user_id):
     token = get_feishu_token()
     if not token:
         return user_id 
 
-    url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id}"
+    # *** 核心修改点 1: 在URL中明确指定我们提供的ID类型是 open_id ***
+    url = f"https://open.feishu.cn/open-apis/contact/v3/users/{user_id}?user_id_type=open_id"
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
@@ -65,7 +64,7 @@ def get_user_name(user_id):
         print(f"获取用户名失败: {e}")
         return user_id
 
-# --- 飞书事件的主处理函数 (保持不变) ---
+# --- 飞书事件的主处理函数 ---
 @app.route('/feishu-event', methods=['POST'])
 def handle_feishu_event():
     data = request.json
@@ -88,7 +87,9 @@ def handle_feishu_event():
             return jsonify({'status': '忽略空消息'})
 
         sender_info = event.get('sender', {})
-        user_id = sender_info.get('sender_id', {}).get('user_id')
+        
+        # *** 核心修改点 2: 明确从 sender_id 中获取 open_id ***
+        user_id = sender_info.get('sender_id', {}).get('open_id')
         
         if user_id:
             sender_name = get_user_name(user_id)
