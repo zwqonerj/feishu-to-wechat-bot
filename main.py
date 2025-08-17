@@ -12,6 +12,7 @@ app = Flask(__name__)
 USER_ID_ALIAS = {
     "b37126g7": "个人威",
     "5d5g44cg": "邹文强"
+    "automation_bitable_reminder": "⏰ 多维表格提醒"  # <-- 新增这一行
     # 格式: "飞书提供的ID": "您想显示的姓名"
 }
 
